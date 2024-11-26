@@ -1,3 +1,5 @@
+//MultiBetDapp.jsx
+
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -5,15 +7,20 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Alert, AlertDescription } from '../components/ui/alert';
 import MultiBetExpJson from '../contracts/MultiBetExp.json';
-const CONTRACT_ABI = MultiBetExpJson.abi;
+import HYBLOCKTokenJson from '../contracts/HYBLOCKToken.json';
 
 const CONTRACT_ADDRESS = process.env.REACT_APP_CONTRACT_ADDRESS;
 const HOLESKY_RPC_URL = process.env.REACT_APP_HOLESKY_RPC_URL;
+const TOKEN_ADDRESS = process.env.REACT_APP_TOKEN_ADDRESS;
+
+const CONTRACT_ABI = MultiBetExpJson.abi;
+const TOKEN_ABI = HYBLOCKTokenJson.abi;
 
 const MultiBetDApp = () => {
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
   const [contract, setContract] = useState(null);
+  const [tokenContract, setTokenContract] = useState(null);
   const [account, setAccount] = useState('');
   const [isOwner, setIsOwner] = useState(false);
   const [betCount, setBetCount] = useState(0);
@@ -21,6 +28,8 @@ const MultiBetDApp = () => {
   const [betDetails, setBetDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [tokenBalance, setTokenBalance] = useState('0');
+  const [isApproved, setIsApproved] = useState(false);
 
   // New bet state
   const [newBetTopic, setNewBetTopic] = useState('');
@@ -30,49 +39,46 @@ const MultiBetDApp = () => {
   const [selectedOption, setSelectedOption] = useState('');
   const [betAmount, setBetAmount] = useState('');
 
-  // connectWallet 함수 수정
   const connectWallet = async () => {
     try {
       if (window.ethereum) {
-        // Holesky testnet의 chain ID는 17000입니다
+        // Holesky testnet configuration
         const holeskyChainId = "0x4268";
-        
-        // 현재 네트워크 확인
-        const chainId = await window.ethereum.request({ method: 'eth_chainId' });
-        
-        // Holesky가 아니면 네트워크 전환 요청
-        if (chainId !== holeskyChainId) {
-          try {
-            await window.ethereum.request({
-              method: 'wallet_switchEthereumChain',
-              params: [{ chainId: holeskyChainId }],
-            });
-          } catch (switchError) {
-            // 사용자가 Holesky를 추가하지 않은 경우, 추가하도록 요청
-            if (switchError.code === 4902) {
-              try {
-                await window.ethereum.request({
-                  method: 'wallet_addEthereumChain',
-                  params: [
-                    {
-                      chainId: holeskyChainId,
-                      chainName: 'Holesky Testnet',
-                      nativeCurrency: {
-                        name: 'ETH',
-                        symbol: 'ETH',
-                        decimals: 18
-                      },
-                      rpcUrls: [HOLESKY_RPC_URL],
-                      blockExplorerUrls: ['https://holesky.etherscan.io']
-                    },
-                  ],
-                });
-              } catch (addError) {
-                throw new Error('Failed to add Holesky network');
-              }
-            } else {
-              throw switchError;
+        const holeskyNetwork = {
+          chainId: holeskyChainId,
+          chainName: 'Holesky Testnet',
+          nativeCurrency: {
+            name: 'ETH',
+            symbol: 'ETH',
+            decimals: 18
+          },
+          rpcUrls: [HOLESKY_RPC_URL || 'https://holesky-rpc.publicnode.com'],
+          blockExplorerUrls: ['https://holesky.etherscan.io']
+        };
+
+        try {
+          // First try to switch to Holesky if it exists
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: holeskyChainId }],
+          });
+        } catch (switchError) {
+          // If Holesky network doesn't exist, add it
+          if (switchError.code === 4902 || switchError.code === -32603) {
+            try {
+              await window.ethereum.request({
+                method: 'wallet_addEthereumChain',
+                params: [holeskyNetwork],
+              });
+            } catch (addError) {
+              console.error('Error adding Holesky network:', addError);
+              setError('Failed to add Holesky network. Please add it manually in MetaMask.');
+              return;
             }
+          } else {
+            console.error('Error switching to Holesky network:', switchError);
+            setError('Failed to switch network. Please switch to Holesky network manually.');
+            return;
           }
         }
 
@@ -80,26 +86,29 @@ const MultiBetDApp = () => {
         const provider = new ethers.providers.Web3Provider(window.ethereum);
         const signer = provider.getSigner();
         const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+        const tokenContract = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
         
         setProvider(provider);
         setSigner(signer);
         setContract(contract);
-        setAccount(await signer.getAddress());
+        setTokenContract(tokenContract);
+        
+        const userAddress = await signer.getAddress();
+        setAccount(userAddress);
         
         // Check if connected account is owner
         const contractOwner = await contract.owner();
-        setIsOwner(contractOwner.toLowerCase() === (await signer.getAddress()).toLowerCase());
+        setIsOwner(contractOwner.toLowerCase() === userAddress.toLowerCase());
         
         // Get current bet count
         const count = await contract.betCount();
         setBetCount(Number(count));
 
-        // Listen for network changes
-        window.ethereum.on('chainChanged', () => {
-          window.location.reload();
-        });
+        // Get token balance and allowance
+        await updateTokenInfo(tokenContract, userAddress, contract.address);
 
-        // Listen for account changes
+        // Setup event listeners
+        window.ethereum.on('chainChanged', () => window.location.reload());
         window.ethereum.on('accountsChanged', (accounts) => {
           if (accounts.length === 0) {
             setAccount('');
@@ -118,12 +127,54 @@ const MultiBetDApp = () => {
     }
   };
 
-  // loadBetDetails 함수 수정
+  const updateTokenInfo = async (tokenContract, userAddress, spenderAddress) => {
+    const balance = await tokenContract.balanceOf(userAddress);
+    const allowance = await tokenContract.allowance(userAddress, spenderAddress);
+    setTokenBalance(ethers.utils.formatEther(balance));
+    setIsApproved(allowance.gt(0));
+  };
+
+  const approveToken = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      
+      // Double check if already approved
+      const currentAllowance = await tokenContract.allowance(account, CONTRACT_ADDRESS);
+      if (currentAllowance.gt(0)) {
+        setIsApproved(true);
+        return;
+      }
+
+      // Set approval for maximum possible amount
+      const maxAmount = ethers.constants.MaxUint256;
+      console.log('Requesting token approval...');
+      const tx = await tokenContract.approve(CONTRACT_ADDRESS, maxAmount);
+      
+      console.log('Waiting for approval transaction...');
+      const receipt = await tx.wait();
+      
+      if (receipt.status === 1) {
+        console.log('Token approval successful');
+        setIsApproved(true);
+        // Update token info after successful approval
+        await updateTokenInfo(tokenContract, account, CONTRACT_ADDRESS);
+      } else {
+        throw new Error('Token approval transaction failed');
+      }
+    } catch (err) {
+      console.error('Token approval error:', err);
+      setError(err.message || 'Failed to approve token usage');
+      setIsApproved(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const loadBetDetails = async () => {
     try {
       setLoading(true);
       
-      // 현재 betId의 베팅이 종료되었다면 다음 베팅을 찾습니다
       let foundActiveBet = false;
       let currentId = currentBetId;
       
@@ -190,7 +241,6 @@ const MultiBetDApp = () => {
     }
   };
 
-  // Place bet
   const placeBet = async () => {
     try {
       if (!selectedOption || !betAmount) {
@@ -198,15 +248,21 @@ const MultiBetDApp = () => {
         return;
       }
       
+      if (!isApproved) {
+        setError('Please approve token spending first');
+        return;
+      }
+      
       setLoading(true);
       const tx = await contract.placeBet(
         currentBetId,
         selectedOption,
-        { value: ethers.utils.parseEther(betAmount) }
+        ethers.utils.parseEther(betAmount)
       );
       await tx.wait();
       
       await loadBetDetails();
+      await updateTokenInfo(tokenContract, account, contract.address);
       setSelectedOption('');
       setBetAmount('');
     } catch (err) {
@@ -263,7 +319,34 @@ const MultiBetDApp = () => {
           {!account ? (
             <Button onClick={connectWallet}>Connect Wallet</Button>
           ) : (
-            <div className="text-sm">Connected: {account}</div>
+            <div className="space-y-4">
+              <div className="flex flex-col gap-2">
+                <div className="text-sm">Connected: {account}</div>
+                <div className="text-sm font-semibold">Token Balance: {tokenBalance} HYBLOCK</div>
+                <div className="text-sm">
+                  Token Approval Status: {isApproved ? (
+                    <span className="text-green-600 font-semibold">Approved ✓</span>
+                  ) : (
+                    <span className="text-red-600 font-semibold">Not Approved</span>
+                  )}
+                </div>
+              </div>
+              {!isApproved && (
+                <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200">
+                  <p className="text-sm text-yellow-800 mb-3">
+                    Before placing bets, you need to approve the smart contract to use your HYBLOCK tokens.
+                    This is a one-time approval.
+                  </p>
+                  <Button 
+                    onClick={approveToken} 
+                    disabled={loading}
+                    className="w-full bg-yellow-500 hover:bg-yellow-600"
+                  >
+                    {loading ? 'Approving...' : 'Approve HYBLOCK Token Usage'}
+                  </Button>
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
