@@ -410,7 +410,7 @@ const MultiBetDApp = () => {
                 {betDetails && (
                   <div className="space-y-2">
                     <p className="font-semibold">Topic: {betDetails.topic}</p>
-                    <p>Total Amount: {betDetails.totalAmount} ETH</p>
+                    <p>Total Amount: {betDetails.totalAmount} HYB</p>
                     <p>Status: {betDetails.isResolved ? 'Resolved' : 'Active'}</p>
                     {betDetails.isResolved && (
                       <p className="font-semibold">Winning Option: {betDetails.winningOption}</p>
@@ -420,7 +420,7 @@ const MultiBetDApp = () => {
                       {betDetails.options.map((option, index) => (
                         <div key={index} className="p-2 border rounded">
                           <p className="font-medium">{option}</p>
-                          <p className="text-sm">{betDetails.optionBets[index]} ETH</p>
+                          <p className="text-sm">{betDetails.optionBets[index]} HYB</p>
                         </div>
                       ))}
                     </div>
